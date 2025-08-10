@@ -1,611 +1,394 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { supabase, Application } from '@/lib/supabase'
+import { supabase, Application, Resident, Payment } from '@/lib/supabase'
 import { 
-  Search, 
-  Filter, 
-  Eye, 
-  Check, 
-  X, 
-  Phone, 
-  Mail, 
+  Users, 
+  FileText, 
+  DollarSign, 
+  Home,
+  TrendingUp,
+  AlertTriangle,
+  CheckCircle,
+  Clock,
   Calendar,
-  FileText,
-  User,
-  MessageSquare
+  Phone,
+  Mail,
+  Eye,
+  ArrowRight
 } from 'lucide-react'
 import * as Dialog from '@radix-ui/react-dialog'
-import * as Select from '@radix-ui/react-select'
 import { format } from 'date-fns'
+import Link from 'next/link'
 
-export default function ApplicationsPage() {
-  const [applications, setApplications] = useState<Application[]>([])
-  const [filteredApplications, setFilteredApplications] = useState<Application[]>([])
-  const [selectedApplication, setSelectedApplication] = useState<Application | null>(null)
+interface DashboardStats {
+  applications: {
+    total: number
+    pending: number
+    thisWeek: number
+  }
+  residents: {
+    total: number
+    active: number
+    newThisMonth: number
+  }
+  payments: {
+    totalCollected: number
+    outstanding: number
+    overdue: number
+  }
+  occupancy: {
+    current: number
+    capacity: number
+    percentage: number
+  }
+}
+
+interface RecentActivity {
+  id: string
+  type: 'application' | 'payment' | 'resident'
+  title: string
+  description: string
+  timestamp: string
+  status?: string
+}
+
+export default function DashboardPage() {
+  const [stats, setStats] = useState<DashboardStats>({
+    applications: { total: 0, pending: 0, thisWeek: 0 },
+    residents: { total: 0, active: 0, newThisMonth: 0 },
+    payments: { totalCollected: 0, outstanding: 0, overdue: 0 },
+    occupancy: { current: 0, capacity: 35, percentage: 0 }
+  })
+  const [recentApplications, setRecentApplications] = useState<Application[]>([])
+  const [recentPayments, setRecentPayments] = useState<Payment[]>([])
+  const [recentActivity, setRecentActivity] = useState<RecentActivity[]>([])
   const [loading, setLoading] = useState(true)
-  const [searchTerm, setSearchTerm] = useState('')
-  const [statusFilter, setStatusFilter] = useState('all')
-  const [selectedApplications, setSelectedApplications] = useState<string[]>([])
-  const [bulkDialogOpen, setBulkDialogOpen] = useState(false)
-  const [bulkAction, setBulkAction] = useState<'approve' | 'reject' | 'contact' | null>(null)
-  const [dialogOpen, setDialogOpen] = useState(false)
 
   useEffect(() => {
-    fetchApplications()
+    fetchDashboardData()
   }, [])
 
-  useEffect(() => {
-    filterApplications()
-  }, [applications, searchTerm, statusFilter])
-
-  async function fetchApplications() {
+  async function fetchDashboardData() {
     try {
-      const { data, error } = await supabase
-        .from('applications')
-        .select('*')
-        .order('created_at', { ascending: false })
+      // Fetch all data
+      const [applicationsResult, residentsResult, paymentsResult] = await Promise.all([
+        supabase.from('applications').select('*').order('created_at', { ascending: false }),
+        supabase.from('residents').select('*').order('created_at', { ascending: false }),
+        supabase.from('payments').select(`
+          *,
+          resident:residents(first_name, last_name, room_number)
+        `).order('created_at', { ascending: false })
+      ])
 
-      if (error) throw error
-      setApplications(data || [])
+      const applications = applicationsResult.data || []
+      const residents = residentsResult.data || []
+      const payments = paymentsResult.data || []
+
+      // Calculate stats
+      const now = new Date()
+      const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
+      const monthStart = new Date(now.getFullYear(), now.getMonth(), 1)
+
+      const applicationStats = {
+        total: applications.length,
+        pending: applications.filter(a => a.status === 'pending').length,
+        thisWeek: applications.filter(a => new Date(a.created_at) >= weekAgo).length
+      }
+
+      const activeResidents = residents.filter(r => r.status === 'active')
+      const residentStats = {
+        total: residents.length,
+        active: activeResidents.length,
+        newThisMonth: residents.filter(r => 
+          r.move_in_date && new Date(r.move_in_date) >= monthStart
+        ).length
+      }
+
+      const paymentStats = {
+        totalCollected: payments.filter(p => p.status === 'paid').reduce((sum, p) => sum + p.amount, 0),
+        outstanding: payments.filter(p => p.status === 'pending').reduce((sum, p) => sum + p.amount, 0),
+        overdue: payments.filter(p => 
+          p.status !== 'paid' && new Date(p.due_date) < now
+        ).reduce((sum, p) => sum + p.amount, 0)
+      }
+
+      const occupancyStats = {
+        current: activeResidents.length,
+        capacity: 35,
+        percentage: Math.round((activeResidents.length / 35) * 100)
+      }
+
+      setStats({
+        applications: applicationStats,
+        residents: residentStats,
+        payments: paymentStats,
+        occupancy: occupancyStats
+      })
+
+      // Set recent data
+      setRecentApplications(applications.slice(0, 5))
+      setRecentPayments(payments.slice(0, 5))
+
+      // Generate recent activity
+      const activity: RecentActivity[] = [
+        ...applications.slice(0, 3).map(app => ({
+          id: app.id,
+          type: 'application' as const,
+          title: `New application from ${app.first_name} ${app.last_name}`,
+          description: `Phone: ${app.phone}`,
+          timestamp: app.created_at,
+          status: app.status
+        })),
+        ...payments.filter(p => p.status === 'paid').slice(0, 2).map(payment => ({
+          id: payment.id,
+          type: 'payment' as const,
+          title: `Payment received: $${payment.amount}`,
+          description: `From ${payment.resident?.first_name} ${payment.resident?.last_name}`,
+          timestamp: payment.paid_date || payment.created_at,
+          status: payment.status
+        }))
+      ].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()).slice(0, 5)
+
+      setRecentActivity(activity)
     } catch (error) {
-      console.error('Error fetching applications:', error)
+      console.error('Error fetching dashboard data:', error)
     } finally {
       setLoading(false)
     }
   }
 
-  function filterApplications() {
-    let filtered = applications
-
-    if (searchTerm) {
-      filtered = filtered.filter(app => 
-        app.first_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        app.last_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        app.phone.includes(searchTerm) ||
-        (app.email && app.email.toLowerCase().includes(searchTerm.toLowerCase()))
-      )
-    }
-
-    if (statusFilter !== 'all') {
-      filtered = filtered.filter(app => app.status === statusFilter)
-    }
-
-    setFilteredApplications(filtered)
-  }
-
-  async function updateApplicationStatus(id: string, status: Application['status'], notes?: string) {
-    try {
-      const updates: Partial<Application> = {
-        status,
-        reviewed_at: new Date().toISOString(),
-        reviewed_by: 'Admin', // In a real app, this would be the current user
-      }
-
-      if (notes) {
-        updates.notes = notes
-      }
-
-      const { error } = await supabase
-        .from('applications')
-        .update(updates)
-        .eq('id', id)
-
-      if (error) throw error
-
-      await fetchApplications()
-      setDialogOpen(false)
-      setSelectedApplication(null)
-    } catch (error) {
-      console.error('Error updating application:', error)
-    }
-  }
-
-  async function convertToResident(application: Application) {
-    try {
-      // Create resident record
-      const { error: residentError } = await supabase
-        .from('residents')
-        .insert({
-          first_name: application.first_name,
-          last_name: application.last_name,
-          phone: application.phone,
-          email: application.email,
-          sobriety_date: application.sobriety_date,
-          employment_status: application.employment_status,
-          move_in_date: new Date().toISOString().split('T')[0],
-          status: 'active',
-          monthly_rent: 500, // Default rent
-          application_id: application.id
-        })
-
-      if (residentError) throw residentError
-
-      // Update application status
-      await updateApplicationStatus(application.id, 'approved', 'Converted to resident')
-      
-      alert('Application approved and resident created successfully!')
-    } catch (error) {
-      console.error('Error converting to resident:', error)
-      alert('Error converting to resident. Please try again.')
-    }
-  }
-
-  const handleSelectAll = () => {
-    if (selectedApplications.length === filteredApplications.length) {
-      setSelectedApplications([])
-    } else {
-      setSelectedApplications(filteredApplications.map(app => app.id))
-    }
-  }
-
-  const handleSelectApplication = (applicationId: string) => {
-    setSelectedApplications(prev => 
-      prev.includes(applicationId)
-        ? prev.filter(id => id !== applicationId)
-        : [...prev, applicationId]
-    )
-  }
-
-  const handleBulkAction = async (action: 'approve' | 'reject' | 'contact') => {
-    setBulkAction(action)
-    setBulkDialogOpen(true)
-  }
-
-  const executeBulkAction = async () => {
-    if (!bulkAction || selectedApplications.length === 0) return
-
-    try {
-      const promises = selectedApplications.map(applicationId => {
-        switch (bulkAction) {
-          case 'approve':
-            return updateApplicationStatus(applicationId, 'approved', 'Bulk approved')
-          case 'reject':
-            return updateApplicationStatus(applicationId, 'rejected', 'Bulk rejected')
-          case 'contact':
-            return updateApplicationStatus(applicationId, 'contacted', 'Bulk contacted')
-          default:
-            return Promise.resolve()
-        }
-      })
-
-      await Promise.all(promises)
-      setSelectedApplications([])
-      setBulkDialogOpen(false)
-      setBulkAction(null)
-      
-      alert(`Successfully ${bulkAction}ed ${selectedApplications.length} applications`)
-    } catch (error) {
-      console.error('Error executing bulk action:', error)
-      alert('Error executing bulk action. Please try again.')
-    }
-  }
-
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'pending': return 'bg-yellow-100 text-yellow-800'
-      case 'approved': return 'bg-green-100 text-green-800'
-      case 'rejected': return 'bg-red-100 text-red-800'
-      case 'contacted': return 'bg-blue-100 text-blue-800'
-      default: return 'bg-gray-100 text-gray-800'
-    }
-  }
-
   if (loading) {
     return (
-      <div className="animate-pulse space-y-4">
+      <div className="animate-pulse space-y-6">
         <div className="h-8 bg-gray-200 rounded w-1/4"></div>
-        <div className="h-12 bg-gray-200 rounded"></div>
-        {[...Array(5)].map((_, i) => (
-          <div key={i} className="h-20 bg-gray-200 rounded"></div>
-        ))}
-      </div>
-
-      {/* Bulk Actions */}
-      {selectedApplications.length > 0 && (
-        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center">
-              <span className="text-sm font-medium text-blue-900">
-                {selectedApplications.length} application{selectedApplications.length !== 1 ? 's' : ''} selected
-              </span>
-            </div>
-            <div className="flex items-center space-x-2">
-              <button
-                onClick={() => handleBulkAction('approve')}
-                className="inline-flex items-center px-3 py-1 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm"
-              >
-                <Check className="w-4 h-4 mr-1" />
-                Approve All
-              </button>
-              <button
-                onClick={() => handleBulkAction('contact')}
-                className="inline-flex items-center px-3 py-1 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm"
-              >
-                <Phone className="w-4 h-4 mr-1" />
-                Mark Contacted
-              </button>
-              <button
-                onClick={() => handleBulkAction('reject')}
-                className="inline-flex items-center px-3 py-1 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors text-sm"
-              >
-                <X className="w-4 h-4 mr-1" />
-                Reject All
-              </button>
-              <button
-                onClick={() => setSelectedApplications([])}
-                className="text-gray-500 hover:text-gray-700 text-sm"
-              >
-                Clear
-              </button>
-            </div>
-          </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+          {[...Array(4)].map((_, i) => (
+            <div key={i} className="h-32 bg-gray-200 rounded"></div>
+          ))}
         </div>
-      )}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {[...Array(2)].map((_, i) => (
+            <div key={i} className="h-80 bg-gray-200 rounded"></div>
+          ))}
+        </div>
+      </div>
     )
   }
 
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900">Applications</h1>
-          <p className="text-gray-600">Review and manage housing applications</p>
-        </div>
-        <div className="flex items-center space-x-2">
-          <span className="text-sm text-gray-500">
-            {filteredApplications.length} of {applications.length} applications
-          </span>
-        </div>
+      <div>
+        <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
+        <p className="text-gray-600">Welcome to Haven House Management System</p>
       </div>
 
-      {/* Filters */}
-      <div className="flex flex-col sm:flex-row gap-4">
-        <div className="flex-1 relative">
-          <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 h-4 w-4" />
-          <input
-            type="text"
-            placeholder="Search by name, phone, or email..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-          />
-        </div>
-        <Select.Root value={statusFilter} onValueChange={setStatusFilter}>
-          <Select.Trigger className="inline-flex items-center justify-between px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500 min-w-[140px]">
-            <div className="flex items-center">
-              <Filter className="w-4 h-4 mr-2" />
-              <Select.Value />
+      {/* Stats Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+        {/* Applications */}
+        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium text-gray-600">Applications</p>
+              <p className="text-2xl font-bold text-gray-900">{stats.applications.total}</p>
             </div>
-          </Select.Trigger>
-          <Select.Portal>
-            <Select.Content className="bg-white border border-gray-200 rounded-lg shadow-lg z-50">
-              <Select.Item value="all" className="px-4 py-2 text-sm hover:bg-gray-50 cursor-pointer">
-                All Status
-              </Select.Item>
-              <Select.Item value="pending" className="px-4 py-2 text-sm hover:bg-gray-50 cursor-pointer">
-                Pending
-              </Select.Item>
-              <Select.Item value="approved" className="px-4 py-2 text-sm hover:bg-gray-50 cursor-pointer">
-                Approved
-              </Select.Item>
-              <Select.Item value="rejected" className="px-4 py-2 text-sm hover:bg-gray-50 cursor-pointer">
-                Rejected
-              </Select.Item>
-              <Select.Item value="contacted" className="px-4 py-2 text-sm hover:bg-gray-50 cursor-pointer">
-                Contacted
-              </Select.Item>
-            </Select.Content>
-          </Select.Portal>
-        </Select.Root>
-      </div>
-
-      {/* Applications List */}
-      <div className="bg-white shadow-sm border border-gray-200 rounded-lg overflow-hidden">
-        {filteredApplications.length === 0 ? (
-          <div className="p-8 text-center">
-            <FileText className="mx-auto h-12 w-12 text-gray-400" />
-            <h3 className="mt-2 text-sm font-medium text-gray-900">No applications found</h3>
-            <p className="mt-1 text-sm text-gray-500">
-              {searchTerm || statusFilter !== 'all' 
-                ? 'Try adjusting your search or filters' 
-                : 'Applications will appear here when submitted'}
-            </p>
+            <div className="p-3 bg-blue-50 rounded-full">
+              <FileText className="h-6 w-6 text-blue-600" />
+            </div>
           </div>
-        ) : (
-          <>
-            {/* Header with Select All */}
-            <div className="bg-gray-50 px-6 py-3 border-b border-gray-200">
-              <div className="flex items-center">
-                <input
-                  type="checkbox"
-                  checked={selectedApplications.length === filteredApplications.length && filteredApplications.length > 0}
-                  onChange={handleSelectAll}
-                  className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
-                />
-                <label className="ml-3 text-sm font-medium text-gray-700">
-                  Select all applications
-                </label>
-              </div>
-            </div>
-            
-            <div className="divide-y divide-gray-200">
-              {filteredApplications.map((application) => (
-                <div key={application.id} className="p-6 hover:bg-gray-50">
-                  <div className="flex items-start space-x-4">
-                    <input
-                      type="checkbox"
-                      checked={selectedApplications.includes(application.id)}
-                      onChange={() => handleSelectApplication(application.id)}
-                      className="mt-1 h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
-                    />
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center space-x-3">
-                        <div className="flex-shrink-0">
-                          <div className="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center">
-                            <User className="w-5 h-5 text-blue-600" />
-                          </div>
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <h3 className="text-lg font-medium text-gray-900">
-                            {application.first_name} {application.last_name}
-                          </h3>
-                          <div className="flex items-center space-x-4 text-sm text-gray-500">
-                            <div className="flex items-center">
-                              <Phone className="w-4 h-4 mr-1" />
-                              {application.phone}
-                            </div>
-                            {application.email && (
-                              <div className="flex items-center">
-                                <Mail className="w-4 h-4 mr-1" />
-                                {application.email}
-                              </div>
-                            )}
-                            <div className="flex items-center">
-                              <Calendar className="w-4 h-4 mr-1" />
-                              {format(new Date(application.created_at), 'MMM d, yyyy')}
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                      
-                      {application.message && (
-                        <div className="mt-3 text-sm text-gray-600 line-clamp-2">
-                          <MessageSquare className="w-4 h-4 inline mr-1" />
-                          {application.message}
-                        </div>
-                      )}
+          <div className="mt-4 flex items-center justify-between text-sm">
+            <span className="text-yellow-600 font-medium">{stats.applications.pending} pending</span>
+            <span className="text-gray-500">+{stats.applications.thisWeek} this week</span>
+          </div>
+        </div>
 
-                      <div className="mt-3 flex items-center space-x-4 text-sm text-gray-500">
-                        {application.sobriety_date && (
-                          <span>Sober since: {format(new Date(application.sobriety_date), 'MMM d, yyyy')}</span>
-                        )}
-                        {application.employment_status && (
-                          <span>Employment: {application.employment_status}</span>
-                        )}
-                        {application.housing_needed && (
-                          <span>Housing needed: {application.housing_needed}</span>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="flex items-center space-x-3">
-                      <span className={`px-2 py-1 text-xs font-medium rounded-full ${getStatusColor(application.status)}`}>
-                        {application.status}
-                      </span>
-                      <button
-                        onClick={() => {
-                          setSelectedApplication(application)
-                          setDialogOpen(true)
-                        }}
-                        className="text-blue-600 hover:text-blue-800 font-medium text-sm"
-                      >
-                        <Eye className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              ))}
+        {/* Residents */}
+        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium text-gray-600">Active Residents</p>
+              <p className="text-2xl font-bold text-gray-900">{stats.residents.active}</p>
             </div>
-          </>
-        )}
+            <div className="p-3 bg-green-50 rounded-full">
+              <Users className="h-6 w-6 text-green-600" />
+            </div>
+          </div>
+          <div className="mt-4 flex items-center justify-between text-sm">
+            <span className="text-green-600 font-medium">+{stats.residents.newThisMonth} this month</span>
+            <span className="text-gray-500">of {stats.residents.total} total</span>
+          </div>
+        </div>
+
+        {/* Revenue */}
+        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium text-gray-600">Revenue Collected</p>
+              <p className="text-2xl font-bold text-gray-900">${stats.payments.totalCollected.toLocaleString()}</p>
+            </div>
+            <div className="p-3 bg-purple-50 rounded-full">
+              <DollarSign className="h-6 w-6 text-purple-600" />
+            </div>
+          </div>
+          <div className="mt-4 flex items-center justify-between text-sm">
+            <span className="text-red-600 font-medium">${stats.payments.overdue.toLocaleString()} overdue</span>
+            <span className="text-gray-500">${stats.payments.outstanding.toLocaleString()} pending</span>
+          </div>
+        </div>
+
+        {/* Occupancy */}
+        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium text-gray-600">Occupancy Rate</p>
+              <p className="text-2xl font-bold text-gray-900">{stats.occupancy.percentage}%</p>
+            </div>
+            <div className="p-3 bg-orange-50 rounded-full">
+              <Home className="h-6 w-6 text-orange-600" />
+            </div>
+          </div>
+          <div className="mt-4 flex items-center justify-between text-sm">
+            <span className="text-gray-900 font-medium">{stats.occupancy.current} of {stats.occupancy.capacity}</span>
+            <span className="text-gray-500">beds occupied</span>
+          </div>
+        </div>
       </div>
 
-      {/* Bulk Action Confirmation Dialog */}
-      <Dialog.Root open={bulkDialogOpen} onOpenChange={setBulkDialogOpen}>
-        <Dialog.Portal>
-          <Dialog.Overlay className="fixed inset-0 bg-black bg-opacity-50 z-50" />
-          <Dialog.Content className="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-white rounded-lg shadow-xl z-50 w-full max-w-md">
-            <div className="p-6">
-              <div className="flex items-center justify-between mb-4">
-                <Dialog.Title className="text-lg font-semibold text-gray-900">
-                  Confirm Bulk Action
-                </Dialog.Title>
-                <button
-                  onClick={() => setBulkDialogOpen(false)}
-                  className="text-gray-400 hover:text-gray-600"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-              
-              <div className="mb-6">
-                <p className="text-gray-700">
-                  Are you sure you want to <strong>{bulkAction}</strong> {selectedApplications.length} selected application{selectedApplications.length !== 1 ? 's' : ''}?
-                </p>
-                {bulkAction === 'reject' && (
-                  <p className="text-sm text-red-600 mt-2">
-                    This action cannot be undone.
-                  </p>
-                )}
-              </div>
-              
-              <div className="flex justify-end space-x-3">
-                <button
-                  onClick={() => setBulkDialogOpen(false)}
-                  className="px-4 py-2 text-gray-700 bg-gray-200 rounded-lg hover:bg-gray-300 transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={executeBulkAction}
-                  className={`px-4 py-2 text-white rounded-lg transition-colors ${
-                    bulkAction === 'approve' ? 'bg-green-600 hover:bg-green-700' :
-                    bulkAction === 'reject' ? 'bg-red-600 hover:bg-red-700' :
-                    'bg-blue-600 hover:bg-blue-700'
-                  }`}
-                >
-                  Confirm {bulkAction}
-                </button>
-              </div>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Recent Applications */}
+        <div className="bg-white rounded-lg shadow-sm border border-gray-200">
+          <div className="p-6 border-b border-gray-200">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold text-gray-900">Recent Applications</h3>
+              <Link 
+                href="/dashboard/applications"
+                className="text-blue-600 hover:text-blue-800 text-sm font-medium flex items-center"
+              >
+                View all
+                <ArrowRight className="ml-1 h-4 w-4" />
+              </Link>
             </div>
-          </Dialog.Content>
-        </Dialog.Portal>
-      </Dialog.Root>
-
-      {/* Application Detail Modal */}
-      <Dialog.Root open={dialogOpen} onOpenChange={setDialogOpen}>
-        <Dialog.Portal>
-          <Dialog.Overlay className="fixed inset-0 bg-black bg-opacity-50 z-50" />
-          <Dialog.Content className="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-white rounded-lg shadow-xl z-50 w-full max-w-2xl max-h-[90vh] overflow-y-auto">
-            {selectedApplication && (
-              <div className="p-6">
-                <div className="flex items-center justify-between mb-6">
-                  <Dialog.Title className="text-xl font-semibold text-gray-900">
-                    Application Details
-                  </Dialog.Title>
-                  <button
-                    onClick={() => setDialogOpen(false)}
-                    className="text-gray-400 hover:text-gray-600"
-                  >
-                    <X className="w-6 h-6" />
-                  </button>
-                </div>
-
-                <div className="space-y-6">
-                  {/* Personal Information */}
-                  <div>
-                    <h3 className="text-lg font-medium text-gray-900 mb-3">Personal Information</h3>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      <div>
-                        <label className="text-sm font-medium text-gray-500">Full Name</label>
-                        <p className="text-gray-900">{selectedApplication.first_name} {selectedApplication.last_name}</p>
+          </div>
+          <div className="p-6">
+            {recentApplications.length === 0 ? (
+              <div className="text-center py-4">
+                <FileText className="mx-auto h-12 w-12 text-gray-400" />
+                <p className="mt-2 text-sm text-gray-500">No recent applications</p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {recentApplications.map((application) => (
+                  <div key={application.id} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                    <div className="flex items-center space-x-3">
+                      <div className="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center">
+                        <FileText className="w-5 h-5 text-blue-600" />
                       </div>
                       <div>
-                        <label className="text-sm font-medium text-gray-500">Phone</label>
-                        <p className="text-gray-900">{selectedApplication.phone}</p>
-                      </div>
-                      {selectedApplication.email && (
-                        <div>
-                          <label className="text-sm font-medium text-gray-500">Email</label>
-                          <p className="text-gray-900">{selectedApplication.email}</p>
-                        </div>
-                      )}
-                      {selectedApplication.sobriety_date && (
-                        <div>
-                          <label className="text-sm font-medium text-gray-500">Sobriety Date</label>
-                          <p className="text-gray-900">{format(new Date(selectedApplication.sobriety_date), 'MMM d, yyyy')}</p>
-                        </div>
-                      )}
-                      {selectedApplication.employment_status && (
-                        <div>
-                          <label className="text-sm font-medium text-gray-500">Employment Status</label>
-                          <p className="text-gray-900">{selectedApplication.employment_status}</p>
-                        </div>
-                      )}
-                      {selectedApplication.housing_needed && (
-                        <div>
-                          <label className="text-sm font-medium text-gray-500">Housing Needed</label>
-                          <p className="text-gray-900">{selectedApplication.housing_needed}</p>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Message */}
-                  {selectedApplication.message && (
-                    <div>
-                      <h3 className="text-lg font-medium text-gray-900 mb-3">Message</h3>
-                      <p className="text-gray-700 bg-gray-50 p-4 rounded-lg">{selectedApplication.message}</p>
-                    </div>
-                  )}
-
-                  {/* Application Status */}
-                  <div>
-                    <h3 className="text-lg font-medium text-gray-900 mb-3">Application Status</h3>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      <div>
-                        <label className="text-sm font-medium text-gray-500">Current Status</label>
-                        <p className={`inline-block px-2 py-1 text-xs font-medium rounded-full ${getStatusColor(selectedApplication.status)}`}>
-                          {selectedApplication.status}
+                        <p className="text-sm font-medium text-gray-900">
+                          {application.first_name} {application.last_name}
+                        </p>
+                        <p className="text-xs text-gray-500">
+                          {format(new Date(application.created_at), 'MMM d, h:mm a')}
                         </p>
                       </div>
-                      <div>
-                        <label className="text-sm font-medium text-gray-500">Submitted</label>
-                        <p className="text-gray-900">{format(new Date(selectedApplication.created_at), 'MMM d, yyyy h:mm a')}</p>
-                      </div>
-                      {selectedApplication.reviewed_at && (
-                        <>
-                          <div>
-                            <label className="text-sm font-medium text-gray-500">Reviewed</label>
-                            <p className="text-gray-900">{format(new Date(selectedApplication.reviewed_at), 'MMM d, yyyy h:mm a')}</p>
-                          </div>
-                          <div>
-                            <label className="text-sm font-medium text-gray-500">Reviewed By</label>
-                            <p className="text-gray-900">{selectedApplication.reviewed_by}</p>
-                          </div>
-                        </>
-                      )}
                     </div>
-                    {selectedApplication.notes && (
-                      <div className="mt-4">
-                        <label className="text-sm font-medium text-gray-500">Notes</label>
-                        <p className="text-gray-700 bg-gray-50 p-3 rounded-lg mt-1">{selectedApplication.notes}</p>
-                      </div>
-                    )}
+                    <span className={`px-2 py-1 text-xs font-medium rounded-full ${
+                      application.status === 'pending' ? 'bg-yellow-100 text-yellow-800' :
+                      application.status === 'approved' ? 'bg-green-100 text-green-800' :
+                      application.status === 'rejected' ? 'bg-red-100 text-red-800' :
+                      'bg-blue-100 text-blue-800'
+                    }`}>
+                      {application.status}
+                    </span>
                   </div>
-
-                  {/* Actions */}
-                  <div className="flex flex-col sm:flex-row gap-3 pt-6 border-t border-gray-200">
-                    {selectedApplication.status === 'pending' && (
-                      <>
-                        <button
-                          onClick={() => convertToResident(selectedApplication)}
-                          className="flex items-center justify-center px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
-                        >
-                          <Check className="w-4 h-4 mr-2" />
-                          Approve & Create Resident
-                        </button>
-                        <button
-                          onClick={() => updateApplicationStatus(selectedApplication.id, 'contacted')}
-                          className="flex items-center justify-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-                        >
-                          <Phone className="w-4 h-4 mr-2" />
-                          Mark as Contacted
-                        </button>
-                        <button
-                          onClick={() => updateApplicationStatus(selectedApplication.id, 'rejected', 'Application rejected')}
-                          className="flex items-center justify-center px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
-                        >
-                          <X className="w-4 h-4 mr-2" />
-                          Reject
-                        </button>
-                      </>
-                    )}
-                    <button
-                      onClick={() => setDialogOpen(false)}
-                      className="flex items-center justify-center px-4 py-2 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400 transition-colors"
-                    >
-                      Close
-                    </button>
-                  </div>
-                </div>
+                ))}
               </div>
             )}
-          </Dialog.Content>
-        </Dialog.Portal>
-      </Dialog.Root>
+          </div>
+        </div>
+
+        {/* Recent Activity */}
+        <div className="bg-white rounded-lg shadow-sm border border-gray-200">
+          <div className="p-6 border-b border-gray-200">
+            <h3 className="text-lg font-semibold text-gray-900">Recent Activity</h3>
+          </div>
+          <div className="p-6">
+            {recentActivity.length === 0 ? (
+              <div className="text-center py-4">
+                <Clock className="mx-auto h-12 w-12 text-gray-400" />
+                <p className="mt-2 text-sm text-gray-500">No recent activity</p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {recentActivity.map((activity) => (
+                  <div key={`${activity.type}-${activity.id}`} className="flex items-start space-x-3">
+                    <div className={`p-2 rounded-full ${
+                      activity.type === 'application' ? 'bg-blue-50' :
+                      activity.type === 'payment' ? 'bg-green-50' :
+                      'bg-purple-50'
+                    }`}>
+                      {activity.type === 'application' ? (
+                        <FileText className="h-4 w-4 text-blue-600" />
+                      ) : activity.type === 'payment' ? (
+                        <DollarSign className="h-4 w-4 text-green-600" />
+                      ) : (
+                        <Users className="h-4 w-4 text-purple-600" />
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-gray-900">{activity.title}</p>
+                      <p className="text-sm text-gray-500">{activity.description}</p>
+                      <p className="text-xs text-gray-400 mt-1">
+                        {format(new Date(activity.timestamp), 'MMM d, h:mm a')}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Quick Actions */}
+      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+        <h3 className="text-lg font-semibold text-gray-900 mb-4">Quick Actions</h3>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <Link
+            href="/dashboard/applications"
+            className="flex items-center p-4 bg-blue-50 rounded-lg hover:bg-blue-100 transition-colors"
+          >
+            <FileText className="h-8 w-8 text-blue-600 mr-3" />
+            <div>
+              <p className="font-medium text-blue-900">Review Applications</p>
+              <p className="text-sm text-blue-700">{stats.applications.pending} pending review</p>
+            </div>
+          </Link>
+          
+          <Link
+            href="/dashboard/residents"
+            className="flex items-center p-4 bg-green-50 rounded-lg hover:bg-green-100 transition-colors"
+          >
+            <Users className="h-8 w-8 text-green-600 mr-3" />
+            <div>
+              <p className="font-medium text-green-900">Manage Residents</p>
+              <p className="text-sm text-green-700">{stats.residents.active} active residents</p>
+            </div>
+          </Link>
+          
+          <Link
+            href="/dashboard/payments"
+            className="flex items-center p-4 bg-purple-50 rounded-lg hover:bg-purple-100 transition-colors"
+          >
+            <DollarSign className="h-8 w-8 text-purple-600 mr-3" />
+            <div>
+              <p className="font-medium text-purple-900">Track Payments</p>
+              <p className="text-sm text-purple-700">${stats.payments.outstanding.toLocaleString()} outstanding</p>
+            </div>
+          </Link>
+        </div>
+      </div>
     </div>
   )
 }
